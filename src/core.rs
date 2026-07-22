@@ -1,11 +1,13 @@
 use std::{
+    collections::VecDeque,
     io::{Write, stdout},
+    ops::ControlFlow,
     time::Duration,
 };
 
 use crossterm::{
     cursor::{self, MoveTo},
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{self, Clear, ClearType, size},
 };
@@ -29,6 +31,10 @@ const IVT_START: usize = 0x0100;
 pub const MEM_SIZE: usize = 0x10000;
 
 pub const MMIO_PRINT: usize = 0x4910;
+pub const MMIO_INPUT: usize = 0x4911;
+pub const MMIO_INPUT_RD: usize = 0x4912;
+
+pub const INPUT_BUF_SIZE: usize = 10;
 
 pub const MMIO_DSK_SEC: usize = 0x4920;
 pub const MMIO_DSK_ADR: usize = 0x4922;
@@ -105,6 +111,7 @@ pub struct Vm {
     pub ip: u16,
     pub disk: DiskDriver,
     pub video: Video,
+    pub input_buffer: VecDeque<u8>,
 }
 
 impl Vm {
@@ -116,6 +123,7 @@ impl Vm {
             ip: 0,
             disk: DiskDriver::new(),
             video: Video::new(),
+            input_buffer: VecDeque::with_capacity(INPUT_BUF_SIZE),
         }
     }
 
@@ -295,7 +303,14 @@ impl Vm {
             }
             Instr::Ldb => {
                 let addr = self.pop_word()?;
-                self.push_word(self.read_byte(addr) as u16)?;
+
+                let val = if addr as usize == MMIO_INPUT_RD {
+                    self.input_buffer.pop_front().unwrap_or(0)
+                } else {
+                    self.read_byte(addr)
+                };
+
+                self.push_word(val as u16)?;
             }
             Instr::Stb => {
                 let addr = self.pop_word()?;
@@ -414,10 +429,12 @@ impl Vm {
         let mut error_msg: Option<String> = None;
 
         loop {
-            // quit check
+            // // clear input
+            // self.memory[MMIO_INPUT] = 0;
+            // handle input
             if event::poll(Duration::from_millis(0)).map_err(wrap_err)? {
                 if let Event::Key(key) = event::read().map_err(wrap_err)? {
-                    if let KeyCode::Char('q') = key.code {
+                    if let ControlFlow::Break(_) = handle_input(key, &mut self.memory, &mut self.input_buffer) {
                         break;
                     }
                 }
@@ -534,5 +551,58 @@ impl Vm {
 
         out.flush()?;
         Ok(())
+    }
+}
+
+fn handle_input(
+    key: event::KeyEvent,
+    memory: &mut [u8; MEM_SIZE],
+    input_buffer: &mut VecDeque<u8>,
+) -> ControlFlow<()> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
+            return ControlFlow::Break(());
+        }
+        (code, _) => {
+            let byte = keycode_to_u8(code);
+            memory[MMIO_INPUT] = byte;
+            if input_buffer.len() < INPUT_BUF_SIZE {
+                input_buffer.push_back(byte);
+            }
+            return ControlFlow::Continue(());
+        }
+    }
+}
+
+/// supports: ascii characters, arrow keys, enter, backspace, tab, escape
+fn keycode_to_u8(key: KeyCode) -> u8 {
+    match key {
+        KeyCode::Char(ch) => ch as u8,
+        KeyCode::Backspace => 8,
+        KeyCode::Tab => 9,
+        KeyCode::Enter => 13,
+        KeyCode::Esc => 27,
+        KeyCode::Left => 37,
+        KeyCode::Up => 38,
+        KeyCode::Right => 39,
+        KeyCode::Down => 40,
+        KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::BackTab
+        | KeyCode::Delete
+        | KeyCode::Insert
+        | KeyCode::F(_)
+        | KeyCode::Null
+        | KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::KeypadBegin
+        | KeyCode::Media(_)
+        | KeyCode::Modifier(_) => 0,
     }
 }

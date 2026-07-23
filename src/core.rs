@@ -6,17 +6,15 @@ use std::{
 };
 
 use crossterm::{
-    cursor::{self, MoveTo},
     event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{self, Clear, ClearType, size},
+    terminal,
 };
 
 use crate::{
     disk::DiskDriver,
     error::{RuntimeError, RuntimeResult},
     instr::Instr,
-    video::{VIDEO_HEIGHT, VIDEO_WIDTH, Video},
+    video::Video,
 };
 
 // const MBIN_MAGIC: &[u8; 4] = b"MBIN";
@@ -112,6 +110,7 @@ pub struct Vm {
     pub disk: DiskDriver,
     pub video: Video,
     pub input_buffer: VecDeque<u8>,
+    pub debug_mode: bool,
 }
 
 impl Vm {
@@ -124,6 +123,7 @@ impl Vm {
             disk: DiskDriver::new(),
             video: Video::new(),
             input_buffer: VecDeque::with_capacity(INPUT_BUF_SIZE),
+            debug_mode: false,
         }
     }
 
@@ -374,8 +374,20 @@ impl Vm {
 
     pub fn update_terminal(&mut self) {
         if self.memory[MMIO_PRINT] != 0 {
-            self.video.put_char(self.memory[MMIO_PRINT]);
-            self.memory[MMIO_PRINT] = 0
+            let ch = self.memory[MMIO_PRINT];
+            if self.debug_mode {
+                // In debug mode, write to video buffer for TUI display
+                self.video.set_char(ch);
+            } else {
+                // In normal mode, print to stdout
+                if ch == b'\n' {
+                    print!("\r\n");
+                } else {
+                    print!("{}", ch as char);
+                }
+                stdout().flush().ok();
+            }
+            self.memory[MMIO_PRINT] = 0;
         }
     }
 
@@ -418,143 +430,30 @@ impl Vm {
             RuntimeError(err.to_string())
         }
 
-        let mut running = true;
-        let mut stdout = stdout();
         terminal::enable_raw_mode().map_err(wrap_err)?;
-        execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide).map_err(wrap_err)?;
 
-        // draw static UI once
-        self.draw_static_ui().map_err(wrap_err)?;
-
-        let mut error_msg: Option<String> = None;
-
-        loop {
-            // // clear input
-            // self.memory[MMIO_INPUT] = 0;
-            // handle input
+        let result = loop {
             if event::poll(Duration::from_millis(0)).map_err(wrap_err)? {
                 if let Event::Key(key) = event::read().map_err(wrap_err)? {
                     if let ControlFlow::Break(_) = handle_input(key, &mut self.memory, &mut self.input_buffer) {
-                        break;
+                        break Ok(());
                     }
                 }
             }
 
-            // execute one instruction (may mark video as dirty)
-            if running {
-                match self.exec_instruction() {
-                    Err(e) => {
-                        running = false;
-                        error_msg = Some(format!("Error: {}", e))
-                    }
-                    Ok(true) => {
-                        running = false;
-                        error_msg = Some("Machine halted".to_string())
-                    }
-                    _ => {}
-                }
+            match self.exec_instruction() {
+                Err(e) => break Err(e),
+                Ok(true) => break Ok(()),
+                _ => {}
             }
+        };
 
-            self.draw_footer(error_msg.as_deref()).map_err(wrap_err)?;
-
-            // only redraw if needed
-            if self.video.is_dirty() {
-                self.update_video().map_err(wrap_err)?;
-                self.video.reset_dirty();
-            }
-        }
-
-        execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen).map_err(wrap_err)?;
         terminal::disable_raw_mode().map_err(wrap_err)?;
-        Ok(())
-    }
-
-    fn draw_static_ui(&self) -> std::io::Result<()> {
-        let mut out = stdout();
-        let (term_width, term_height) = size()?;
-        let frame_width = VIDEO_WIDTH + 2;
-        let frame_height = VIDEO_HEIGHT + 3;
-
-        let x_offset = (term_width as usize - frame_width).max(0) / 2;
-        let y_offset = (term_height as usize - frame_height).max(0) / 2;
-
-        execute!(out, Clear(ClearType::All))?;
-
-        let title = " VM VIDEO OUTPUT ";
-        let title_start = x_offset + (frame_width.saturating_sub(title.len())) / 2;
-        execute!(out, MoveTo(title_start as u16, y_offset as u16))?;
-        writeln!(out, "{}", title)?;
-
-        let top = format!("┌{}┐", "─".repeat(VIDEO_WIDTH));
-        execute!(out, MoveTo(x_offset as u16, (y_offset + 1) as u16))?;
-        writeln!(out, "{}", top)?;
-
-        for row in 0..VIDEO_HEIGHT {
-            execute!(out, MoveTo(x_offset as u16, (y_offset + 2 + row) as u16))?;
-            writeln!(out, "│{}│", " ".repeat(VIDEO_WIDTH))?;
-        }
-
-        let bottom = format!("└{}┘", "─".repeat(VIDEO_WIDTH));
-        execute!(
-            out,
-            MoveTo(x_offset as u16, (y_offset + 2 + VIDEO_HEIGHT) as u16)
-        )?;
-        writeln!(out, "{}", bottom)?;
-        out.flush()?;
-        Ok(())
-    }
-
-    fn draw_footer(&self, error: Option<&str>) -> std::io::Result<()> {
-        let mut out = stdout();
-        let (term_width, term_height) = size()?;
-
-        let frame_width = VIDEO_WIDTH + 2;
-        let frame_height = VIDEO_HEIGHT + 3;
-        let x_offset = (term_width as usize - frame_width).max(0) / 2;
-        let y_offset = (term_height as usize - frame_height).max(0) / 2;
-
-        // footer position: below the video frame
-        let footer_y = y_offset + frame_height;
-        execute!(out, MoveTo(x_offset as u16, footer_y as u16))?;
-        write!(out, "Press 'q' to quit")?;
-
-        if let Some(msg) = error {
-            execute!(out, MoveTo(x_offset as u16, (footer_y + 1) as u16))?;
-            write!(out, "{}", msg)?;
-        }
-
-        out.flush()?;
-        Ok(())
-    }
-
-    fn update_video(&self) -> std::io::Result<()> {
-        let mut out = stdout();
-        let (term_width, term_height) = size()?;
-
-        let frame_width = VIDEO_WIDTH + 2;
-        let frame_height = VIDEO_HEIGHT + 3;
-
-        let x_offset = (term_width as usize - frame_width).max(0) / 2;
-        let y_offset = (term_height as usize - frame_height).max(0) / 2;
-
-        for row in 0..VIDEO_HEIGHT {
-            execute!(
-                out,
-                MoveTo((x_offset + 1) as u16, (y_offset + 2 + row) as u16)
-            )?;
-            for col in 0..VIDEO_WIDTH {
-                let ch = self.video.get_char(row * VIDEO_WIDTH + col);
-                let ch = if ch == 0 { ' ' } else { ch as char };
-                write!(out, "{}", ch)?;
-            }
-        }
-
-        out.flush()?;
-        Ok(())
+        result
     }
 }
 
-fn handle_input(
+pub fn handle_input(
     key: event::KeyEvent,
     memory: &mut [u8; MEM_SIZE],
     input_buffer: &mut VecDeque<u8>,
@@ -575,7 +474,7 @@ fn handle_input(
 }
 
 /// supports: ascii characters, arrow keys, enter, backspace, tab, escape
-fn keycode_to_u8(key: KeyCode) -> u8 {
+pub fn keycode_to_u8(key: KeyCode) -> u8 {
     match key {
         KeyCode::Char(ch) => ch as u8,
         KeyCode::Backspace => 8,

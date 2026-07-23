@@ -15,7 +15,7 @@ use ratatui::{
 use std::io::{self, stdout};
 
 use crate::{
-    core::Vm,
+    core::{Vm, INPUT_BUF_SIZE, MMIO_INPUT},
     instr::Instr,
     video::{VIDEO_HEIGHT, VIDEO_WIDTH},
 };
@@ -28,6 +28,7 @@ pub struct Debugger<'a> {
 
 impl<'a> Debugger<'a> {
     pub fn new(vm: &'a mut Vm) -> Self {
+        vm.debug_mode = true;
         Self {
             vm,
             mem_offset: 0,
@@ -94,50 +95,61 @@ impl<'a> Debugger<'a> {
 
             if event::poll(std::time::Duration::from_millis(self.speed))? {
                 if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('q') => break, // quit debugger
-                        KeyCode::Char('s') => {
-                            // single step
-                            if !halted && !running {
-                                match self.vm.exec_instruction() {
-                                    Ok(true) => {
-                                        info_lines.push("program halted".into());
-                                        halted = true;
+                    if key.modifiers.contains(event::KeyModifiers::CONTROL) {
+                        match key.code {
+                            KeyCode::Char('q') => break, // quit debugger
+                            KeyCode::Char('s') => {
+                                // single step
+                                if !halted && !running {
+                                    match self.vm.exec_instruction() {
+                                        Ok(true) => {
+                                            info_lines.push("program halted".into());
+                                            halted = true;
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => {
+                                            info_lines.push(format!("runtime error: {}", e))
+                                        }
                                     }
-                                    Ok(false) => {}
-                                    Err(e) => info_lines.push(format!("runtime error: {}", e)),
                                 }
                             }
-                        }
-                        KeyCode::Char('c') => running = true, // start continuous execution
-                        KeyCode::Char('x') => running = false, // stop continuous execution
-                        KeyCode::Char('+') => {
-                            // scroll memory down
-                            if self.mem_offset + 0x80 < self.vm.memory.len() {
-                                self.mem_offset += 0x80;
+                            KeyCode::Char('c') => running = true, // start continuous execution
+                            KeyCode::Char('x') => running = false, // stop continuous execution
+                            KeyCode::Char('n') => {
+                                // scroll memory down
+                                if self.mem_offset + 0x80 < self.vm.memory.len() {
+                                    self.mem_offset += 0x80;
+                                }
                             }
-                        }
-                        KeyCode::Char('-') => {
-                            // scroll memory up
-                            if self.mem_offset >= 0x80 {
-                                self.mem_offset -= 0x80;
-                            } else {
-                                self.mem_offset = 0;
+                            KeyCode::Char('p') => {
+                                // scroll memory up
+                                if self.mem_offset >= 0x80 {
+                                    self.mem_offset -= 0x80;
+                                } else {
+                                    self.mem_offset = 0;
+                                }
                             }
-                        }
-                        KeyCode::Char('>') => {
-                            if self.speed > 1 {
-                                // minimum 1ms
-                                self.speed >>= 1;
+                            KeyCode::Char('f') => {
+                                if self.speed > 1 {
+                                    // minimum 1ms
+                                    self.speed >>= 1;
+                                }
                             }
-                        }
-                        KeyCode::Char('<') => {
-                            if self.speed < 2048 {
-                                // max 2s
-                                self.speed <<= 1;
+                            KeyCode::Char('l') => {
+                                if self.speed < 2048 {
+                                    // max 2s
+                                    self.speed <<= 1;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
+                    } else {
+                        // Pass non-Ctrl key events to the VM's input system
+                        let byte = debug_keycode_to_u8(key.code);
+                        self.vm.memory[MMIO_INPUT] = byte;
+                        if self.vm.input_buffer.len() < INPUT_BUF_SIZE {
+                            self.vm.input_buffer.push_back(byte);
+                        }
                     }
                 }
             }
@@ -529,14 +541,14 @@ impl<'a> Debugger<'a> {
     fn render_info(&self, info_lines: &Vec<String>) -> Paragraph<'_> {
         let shortcuts = vec![
             String::new(),
-            "q - quit".into(),
-            "s - step".into(),
-            "c - continue".into(),
-            "x - stop".into(),
-            "+ - scroll mem down".into(),
-            "- - scroll mem up".into(),
-            "> - faster".into(),
-            "< - slower".into(),
+            "Ctrl+Q - quit".into(),
+            "Ctrl+S - step".into(),
+            "Ctrl+C - continue".into(),
+            "Ctrl+X - stop".into(),
+            "Ctrl+N - scroll mem down".into(),
+            "Ctrl+P - scroll mem up".into(),
+            "Ctrl+F - faster".into(),
+            "Ctrl+L - slower".into(),
         ];
 
         // display last 15 info messages
@@ -574,5 +586,38 @@ impl<'a> Debugger<'a> {
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false })
+    }
+}
+
+/// supports: ascii characters, arrow keys, enter, backspace, tab, escape
+fn debug_keycode_to_u8(key: KeyCode) -> u8 {
+    match key {
+        KeyCode::Char(ch) => ch as u8,
+        KeyCode::Backspace => 8,
+        KeyCode::Tab => 9,
+        KeyCode::Enter => 13,
+        KeyCode::Esc => 27,
+        KeyCode::Left => 37,
+        KeyCode::Up => 38,
+        KeyCode::Right => 39,
+        KeyCode::Down => 40,
+        KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::BackTab
+        | KeyCode::Delete
+        | KeyCode::Insert
+        | KeyCode::F(_)
+        | KeyCode::Null
+        | KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::KeypadBegin
+        | KeyCode::Media(_)
+        | KeyCode::Modifier(_) => 0,
     }
 }

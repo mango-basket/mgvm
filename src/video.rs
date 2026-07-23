@@ -4,7 +4,6 @@ pub const VIDEO_HEIGHT: usize = 12;
 pub struct Video {
     mem: [u8; VIDEO_HEIGHT * VIDEO_WIDTH],
     cursor: usize,
-    dirty: bool,
 }
 
 impl Video {
@@ -12,7 +11,6 @@ impl Video {
         Video {
             mem: [0; VIDEO_HEIGHT * VIDEO_WIDTH],
             cursor: 0,
-            dirty: true,
         }
     }
 
@@ -20,36 +18,21 @@ impl Video {
         self.mem[idx]
     }
 
-    pub fn get_cur(&self) -> usize {
-        self.cursor
-    }
-
-    pub fn set_cur(&mut self, val: usize) {
-        self.cursor = val % (VIDEO_HEIGHT * VIDEO_WIDTH)
-    }
-
-    pub fn inc_cur(&mut self) {
-        self.set_cur(self.get_cur() + 1);
-    }
-
-    pub fn put_char(&mut self, ch: u8) {
+    pub fn set_char(&mut self, ch: u8) {
         if ch == b'\n' {
-            self.set_cur(self.get_cur() + VIDEO_WIDTH);
-        } else if ch == b'\r' {
-            self.set_cur((self.get_cur() / VIDEO_WIDTH) * VIDEO_WIDTH);
+            // Move to start of next line
+            self.cursor = (self.cursor / VIDEO_WIDTH + 1) * VIDEO_WIDTH;
+            if self.cursor >= VIDEO_HEIGHT * VIDEO_WIDTH {
+                self.cursor = 0;
+            }
         } else {
-            self.mem[self.get_cur()] = ch;
-            self.inc_cur();
+            if self.cursor < VIDEO_HEIGHT * VIDEO_WIDTH {
+                self.mem[self.cursor] = ch;
+            }
+            self.cursor += 1;
+            if self.cursor >= VIDEO_HEIGHT * VIDEO_WIDTH {
+                self.cursor = 0;
+            }
         }
-
-        self.dirty = true;
-    }
-
-    pub fn reset_dirty(&mut self) {
-        self.dirty = false;
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.dirty
     }
 }
